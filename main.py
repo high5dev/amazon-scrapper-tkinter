@@ -1,9 +1,77 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
 import requests
 from bs4 import BeautifulSoup
-from tkinter import Tk, Label, Button, Entry, StringVar, Text, Scrollbar, messagebox
-from PIL import Image, ImageTk
 import csv
+from PIL import Image, ImageTk
 import io
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as ReportLabImage
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+
+def save_to_pdf(product_name_value, details, price, about_item, img_data):
+    pdf_filename = f"{product_name_value[:30]}.pdf"  # Limit filename length
+    doc = SimpleDocTemplate(pdf_filename, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Add product name
+    story.append(Paragraph(product_name_value, styles['Title']))
+    story.append(Spacer(1, 12))
+
+    # Add price
+    story.append(Paragraph(f"<b>Price:</b> {price}", styles['Normal']))
+    story.append(Spacer(1, 6))
+
+    # Add image
+    if img_data:
+        img = ReportLabImage(io.BytesIO(img_data), width=3*inch, height=3*inch)
+        story.append(img)
+        story.append(Spacer(1, 12))
+
+    # Add details
+    for detail_name, detail_value in details.items():
+        story.append(Paragraph(f"<b>{detail_name}:</b> {detail_value}", styles['Normal']))
+        story.append(Spacer(1, 6))
+
+    # Add "About this item" list to PDF
+    if about_item:
+        story.append(Spacer(1, 12))
+        story.append(Paragraph("<b>About this item:</b>", styles['Normal']))
+        story.append(Spacer(1, 6))
+        for item in about_item:
+            story.append(Paragraph(f"• {item}", styles['Normal']))
+            story.append(Spacer(1, 6))
+
+    doc.build(story)
+    return pdf_filename
+
+def save_to_csv(product_name, details, price, about_item):
+    filename = f"{product_name[:30]}.csv"  # Limit filename length
+    with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Product Name', product_name])
+        writer.writerow(['Price', price])  # Add price to CSV
+        for detail_name, detail_value in details.items():
+            writer.writerow([detail_name, detail_value])
+        # Add "About this item" section to CSV
+        about_item_str = " \u2022 ".join(about_item)
+        writer.writerow(['About this item', about_item_str])
+    return filename
+
+def display_image(img_data):
+    try:
+        img = Image.open(io.BytesIO(img_data))
+        img.thumbnail((200, 200))  # Resize image to fit in the GUI
+        photo = ImageTk.PhotoImage(img)
+        img_label.config(image=photo)
+        img_label.image = photo  # Keep a reference
+    except Exception as e:
+        messagebox.showwarning("Warning", f"Failed to load image: {str(e)}")
+
+def handle_error(message):
+    messagebox.showerror("Error", message)
 
 def fetch_product_details():
     url = url_entry.get()
@@ -22,14 +90,40 @@ def fetch_product_details():
         product_name_value = title_tag.get_text(strip=True) if title_tag else 'Product name not found'
 
         img_tag = soup.find('img', id='landingImage')
+        img_data = None
 
         if img_tag:
             img_url = img_tag['data-old-hires']
-            display_image(img_url)
+            img_response = requests.get(img_url)
+            img_data = img_response.content
+            display_image(img_data)
         else:
             messagebox.showwarning("Warning", "Could not find product image")
 
+        # Extract price
+        price_tag = soup.find('span', class_='a-price-whole')
+        price_value = 'Price not found'
+        if price_tag:
+            whole_price = price_tag.get_text(strip=True)
+            fraction_tag = soup.find('span', class_='a-price-fraction')
+            if fraction_tag:
+                fraction_price = fraction_tag.get_text(strip=True)
+                price_value = f"£{whole_price}.{fraction_price}"
+            else:
+                price_value = f"£{whole_price}"
 
+        # Extract "About this item"
+        about_item = []
+        about_section = soup.find(id='feature-bullets')
+        if about_section:
+            list_items = about_section.find_all('li', class_='a-spacing-mini')
+            for li in list_items:
+                about_item.append(li.get_text(strip=True))
+
+        # Display the product name and price in the GUI
+        product_name.set(f"{product_name_value} - {price_value}")
+        details_text.delete(1.0, "end")  # Clear previous details
+        details_text.insert("end", f"Price: {price_value}\n")
 
         # Extract additional details
         details = {}
@@ -43,78 +137,48 @@ def fetch_product_details():
                     detail_value = columns[1].get_text(strip=True)
                     details[detail_name] = detail_value
 
-        # Display the product name and details in the GUI
-        product_name.set(product_name_value)
-        details_text.delete(1.0, "end")  # Clear previous details
+        # Add additional details to the display
         for detail_name, detail_value in details.items():
             details_text.insert("end", f"{detail_name}: {detail_value}\n")
 
-        # Save the details to CSV
-        save_to_csv(product_name_value, details)
+        # Save the details to CSV, including price and "About this item"
+        csv_filename = save_to_csv(product_name_value, details, price_value, about_item)
+        messagebox.showinfo("Success", f"CSV saved as {csv_filename}")
+
+        # Save the details to PDF, including price and "About this item"
+        pdf_filename = save_to_pdf(product_name_value, details, price_value, about_item, img_data)
+        messagebox.showinfo("Success", f"PDF saved as {pdf_filename}")
 
     except requests.exceptions.RequestException as e:
         handle_error(f"Failed to fetch the product page: {str(e)}")
     except Exception as e:
         handle_error(f"An unexpected error occurred: {str(e)}")
 
-def display_image(img_url):
-    try:
-        response = requests.get(img_url)
-        response.raise_for_status()
-        img_data = response.content
-        img = Image.open(io.BytesIO(img_data))
-        img.thumbnail((200, 200))  # Resize image to fit in the GUI
-        photo = ImageTk.PhotoImage(img)
-        img_label.config(image=photo)
-        img_label.image = photo  # Keep a reference
-    except Exception as e:
-        messagebox.showwarning("Warning", f"Failed to load image: {str(e)}")
-
-def save_to_csv(product_name_value, details):
-    # Open CSV file in append mode
-    with open('product_details.csv', mode='a', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file)
-        # Write product name and additional details
-        row = [product_name_value]
-        for detail_name, detail_value in details.items():
-            row.append(f"{detail_name}: {detail_value}")
-        writer.writerow(row)
-
-def handle_error(error_message):
-    messagebox.showerror("Error", error_message)
-    product_name.set('An error occurred')
-    details_text.delete(1.0, "end")
-    details_text.insert("end", error_message)
-    img_label.config(image='')  # Clear the image
-
-# Set up the main window
-root = Tk()
+# GUI setup
+root = tk.Tk()
 root.title("Amazon Product Scraper")
 
-product_name = StringVar()
-product_name.set("Enter URL and click Fetch")
+# URL input
+url_label = ttk.Label(root, text="Enter Amazon product URL:")
+url_label.pack(pady=5)
+url_entry = ttk.Entry(root, width=50)
+url_entry.pack(pady=5)
 
-# GUI layout
-Label(root, text="Enter Amazon Product URL: ").pack()
-url_entry = Entry(root, width=60)
-url_entry.pack()
+# Fetch button
+fetch_button = ttk.Button(root, text="Fetch Product Details", command=fetch_product_details)
+fetch_button.pack(pady=10)
 
-fetch_button = Button(root, text="Fetch", command=fetch_product_details)
-fetch_button.pack()
+# Product name display
+product_name = tk.StringVar()
+product_name_label = ttk.Label(root, textvariable=product_name, wraplength=400)
+product_name_label.pack(pady=5)
 
-Label(root, textvariable=product_name).pack()
+# Image display
+img_label = ttk.Label(root)
+img_label.pack(pady=10)
 
-# Image label
-img_label = Label(root)
-img_label.pack()
-
-# Textbox to display details
-details_text = Text(root, height=10, width=60)
-details_text.pack()
-
-# Scrollbar for the details text box
-scrollbar = Scrollbar(root, command=details_text.yview)
-scrollbar.pack(side="right", fill="y")
-details_text.config(yscrollcommand=scrollbar.set)
+# Details display
+details_text = tk.Text(root, height=10, width=50)
+details_text.pack(pady=10)
 
 root.mainloop()
